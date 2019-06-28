@@ -1,0 +1,8 @@
+# Don't track content of these folders
+code/__pycache__/
+notebooks/.ipynb_checkpoints/
+data/brains
+!data/brains/Ns_5_noiseseed_0.pt
+!data/brains/Ns_5_noiseseed_0_params.pkl
+data/estimates
+!data/estimates/Ns_5_noiseseed_0_0_0.pkl
