@@ -1,5 +1,7 @@
 import numpy as np
-from utils import extractParams, resampleSystematic, nonlinearity, JMatToVec
+from utils import extractParams, resampleSystematic, nonlinearity, JMatToVec, resampleSystematic_torch, JVecToMat_torch, JMatToVec_torch, extractParams_torch
+import torch
+import torch.distributions.multivariate_normal as MVN
 
 
 
@@ -58,7 +60,8 @@ def particlefilter(rMat, hMat, K, P, M, theta, nltype):
     Q_post = (Q_post + Q_post.T)/2 #just to ensure it is perfectly symmetric (numerical errors creepy)
 
 
-    LL = 0 #log likelihood log(p(R))
+    LL      = 0 #log likelihood log(p(R))
+    T_st    = 0 #burn in time for the PF
 
     for tt in range(T):
 
@@ -92,10 +95,11 @@ def particlefilter(rMat, hMat, K, P, M, theta, nltype):
         ParticlesNew = np.random.multivariate_normal(np.zeros([Nx]),Q_post,K).T + mu_post
 
         # assigning weights to the particles proportional to p(r(t)|x(t-1))
-        w_ii = np.exp(-0.5*( rMinvr + sum(f_tap*Pinvf_tap - v*mu_post) )) + 1e-128 #adding a small constant to avoid nan problem
+        w_ii = np.exp(-0.5*( rMinvr + sum(f_tap*Pinvf_tap - v*mu_post) )) + np.float32(1e-38) #adding a small constant to avoid nan problem
         WVec = WVec*w_ii
 
-        LL = LL + np.log(sum(WVec))
+        if tt >= T_st:
+            LL = LL + np.log(sum(WVec))
 
         ParticlesAll[:,:,tt+1] = ParticlesNew
 
@@ -330,14 +334,192 @@ def NegLL_D(theta, rMat, hMat, P_S, WVec, P, M, nltype, computegrad, alpha_J, al
                     
 
     # Add gradient of L2 norm of G
-    #alpha_G = 0
     dG = dG + alpha_G*np.sign(G)
+
+    # force dG[0] = 0 and dG[9] = 0
+    dG[0] = 0
+    dG[9] = 0
     
     # Add gradient of L1 norm of J
-    #alpha_J = 0
     dJ = dJ + alpha_J*np.sign(J)
+    
+    # # force diagonal elements of J to zero
+    # dJ = dJ*(np.ones([Nx,Nx])-np.eye(Nx))
+    
     dJ = JMatToVec(dJ)
 
     dtheta = np.concatenate([dlam, dG, dJ, dU.flatten('F'), dV.flatten('F') ])
     
     return dtheta
+
+
+
+
+def particlefilter_torch(G, J, U, V, lam, r, y, Q_process, Q_obs, Np, device, dtype):
+
+    """
+    add description later
+    """
+
+    B, Nr, T = r.shape
+    Ns       = J.shape[0]
+    Ny       = y.shape[1]
+    Np       = 100 # No. of particles
+
+
+    UT = U.t()
+    J2 = J**2
+
+
+    WVec      = torch.ones((B,Np),device=device,dtype=dtype)/Np
+    Pinv      = torch.pinverse(Q_process)
+    Q_postinv = Pinv + torch.mm(UT,torch.mm(Q_obs.inverse(),U))
+    Q_post    = Q_postinv.inverse()
+    Q_post    = (Q_post + Q_post.t())/2 # make it perfectly symmetric
+
+    mvn_process   = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), covariance_matrix = Q_process)
+    mvn_posterior = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), covariance_matrix = Q_post)
+
+    posterior_samples = mvn_posterior.rsample(sample_shape=torch.Size([B,Np,T])).permute(0,3,1,2)
+
+    # x = torch.matmul(r[:,:,0].unsqueeze(1),torch.pinverse(UT)) + mvn_process.rsample(sample_shape=torch.Size([B,Np]))
+    x = torch.matmul(torch.pinverse(U),r[:,:,0].unsqueeze(2)) + mvn_process.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1)
+
+    ParticlesAll = torch.zeros((B,Ns,Np,T+1),device=device,dtype=dtype)
+    ParticlesAll[...,0] = x
+
+    LL = 0 # Log likelihood
+
+    sigmoid = torch.nn.Sigmoid()
+
+    T_st    = 0 # time after which to compute likelihood (sort of like burn in time of the PF)
+
+    # begin the for loop
+
+    for tt in range(T):
+
+        yt = y[...,tt]
+        rt = r[...,tt]
+
+        Minvr  = torch.matmul(Q_obs.inverse(),rt.unsqueeze(2))# size B x Nr x 1
+        rMinvr = torch.matmul(rt.unsqueeze(1),Minvr)          # size B x 1  x 1
+        UMinvr = torch.matmul(UT,Minvr)                       # size B x Ns x 1
+
+        x2   = x**2
+        J1   = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        Jx   = torch.matmul(J,x)
+        Jx2  = torch.matmul(J,x2)
+        J21  = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        J2x  = torch.matmul(J2,x)
+        J2x2 = torch.matmul(J2,x2)
+
+        argf = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+
+        outmat    = sigmoid(argf)
+        f_tap     = (1-lam)*x + lam*outmat
+        Pinvf_tap = torch.matmul(Pinv, f_tap)
+        v         = Pinvf_tap + UMinvr
+        mu_post   = torch.matmul(Q_post,v) # mean of the proposal distribution
+
+        # sample new particles from proposal distribution
+        # ParticlesNew = mu_post + mvn_posterior.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1)
+        ParticlesNew = mu_post + posterior_samples[...,tt]
+
+        # assign weights to particles proportional to p(r(t)|x(t-1))
+        WVec = WVec*(torch.exp(-0.5*(rMinvr.squeeze(2) + torch.sum(f_tap*Pinvf_tap - v*mu_post,dim=1))) + 1e-38)
+
+        # update log likelihood
+        if tt >= T_st:
+            LL = LL + torch.log(torch.sum(WVec,dim=1))
+
+        # normalize the weights
+        WVec = WVec/torch.sum(WVec,dim=1).unsqueeze(1) 
+
+        # append particles
+        ParticlesAll[...,tt+1] = ParticlesNew
+
+
+        # resample particles based on their weights
+        ESS = 1/torch.sum(WVec**2,dim=1)
+
+        for b in range(B):
+            if ESS[b] < Np/2 and tt != T-1:
+                idx = resampleSystematic_torch(WVec[b],Np, device, dtype)
+                ParticlesAll[b,:,:,0:tt+1] = ParticlesAll[b,:,idx,0:tt+1] 
+                WVec[b] = torch.ones(Np,device=device,dtype=dtype)/Np
+
+
+        x = ParticlesAll[...,tt+1]
+
+        
+
+    xhat = torch.sum(ParticlesAll*WVec.view(B,1,Np,1), dim=2).squeeze(2)
+    
+    return LL, xhat, ParticlesAll, WVec
+
+
+def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, Q_process, Q_obs, device, dtype):
+
+    """
+    add description later
+    """
+    
+    B,Nr,T  = r.shape
+    Ns      = Q_process.shape[0]
+    Ny      = y.shape[1]
+    Np      = Particles.shape[2] # No. of particles
+    
+    UT      = U.t()
+    J2      = J**2
+
+    # two components of the cost
+    C1      = 0
+    C2      = 0
+
+    sigmoid = torch.nn.Sigmoid()
+    
+    Pinv    = torch.inverse(Q_process)
+    Oinv    = torch.inverse(Q_obs)
+
+    T_st    = 0 # time after which to compute likelihood (sort of like burn in time of the PF)
+        
+    for t in range(T):
+
+        rt      = r[...,t]
+        yt      = y[...,t]
+        
+        x       = Particles[...,t]
+        x_curr  = Particles[...,t+1]
+
+        x2   = x**2
+        J1   = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        Jx   = torch.matmul(J,x)
+        Jx2  = torch.matmul(J,x2)
+        J21  = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        J2x  = torch.matmul(J2,x)
+        J2x2 = torch.matmul(J2,x2)
+
+        argf = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+        
+        outmat  = sigmoid(argf)
+        x_pred  = (1-lam)*x + lam*outmat
+
+        dx      = x_curr - x_pred
+        dr      = rt.unsqueeze(2)- torch.matmul(U,x_curr)
+
+        # update the cost
+        if t >= T_st:
+            C1 += 0.5*torch.sum(dx*torch.matmul(Pinv,dx)*Weights.unsqueeze(1))
+            C2 += 0.5*torch.sum(dr*torch.matmul(Oinv,dr)*Weights.unsqueeze(1))
+
+        # C1 += 0.5*torch.sum(torch.sum(dx*torch.matmul(Pinv,dx),dim=1)*Weights)
+        # C2 += 0.5*torch.sum(torch.sum(dr*torch.matmul(Oinv,dr),dim=1)*Weights)
+        
+        # C1 = C1 + 0.5*np.dot(np.sum(dx*np.linalg.solve(P,dx),axis=0), WVec)
+        # C2 = C2 + 0.5*np.dot(np.sum(dr*np.linalg.solve(M,dr),axis=0), WVec)
+
+    # Add the L1 norms of G and J
+    C = C1 + C2
+    # C = C1 + C2 + alpha_G*sum(np.abs(G)) + alpha_J*sum(np.abs(JMatToVec(J)))
+    
+    return C

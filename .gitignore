@@ -3,6 +3,10 @@ code/__pycache__/
 notebooks/.ipynb_checkpoints/
 data/brains
 data/estimates
+results
+scripts/oldscripts
+notebooks/Analysis
+notebooks/Experiments
 
 # But include these example data files
 !data/brains/Ns_5_noiseseed_0.pt

@@ -77,7 +77,10 @@ def initparameters(r_brain, theta, params):
     PermMat = EstimatePermutation_ICA(U,U_hat)
 
     lam_hat = np.array([lam])                       
-    G_hat   = 0.1*np.random.randn(18)           
+    #G_hat   = 0.1*np.random.randn(18)
+    G_hat   = np.random.randn(18)
+    G_hat[0]= 0 #force this condition
+    G_hat[9]= 0 #force this condition          
     J_hat   = Create_J(Ns, params['sparsity_J'], 'nonferr', params['self_coupling_on']) 
     V_hat   = np.linalg.svd(np.random.randn(Ns,Ny), full_matrices=False)[2]
 

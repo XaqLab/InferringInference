@@ -20,11 +20,11 @@ def Create_J(Nx, sp, Jtype, SelfCoupling):
     """
 
     # Create the mask for zeros
-    H = np.random.rand(Nx,Nx)
-    H = np.tril(H,k=-1)
-    H[H < sp] = 0
-    H[H >= sp] = 1
-    
+    H           = np.random.rand(Nx,Nx)
+    H[H < sp]   = 0
+    H[H >= sp]  = 1
+    H           = np.tril(H, k=-1)
+     
     if (SelfCoupling == 1):
         H = H + H.T + np.eye(Nx)
     else:
@@ -38,7 +38,7 @@ def Create_J(Nx, sp, Jtype, SelfCoupling):
         J = J/np.sqrt(Nx)
     elif Jtype == 'antiferr':
         J = -np.tril(np.random.rand(Nx,Nx),-1)
-        J = J + J.T + np.diag(np.random.rand(Nx))
+        J = J + J.T - np.diag(np.random.rand(Nx))
         J = J/np.sqrt(Nx)
     else:
         J = np.tril(0.5*np.random.randn(Nx,Nx),-1)
@@ -46,8 +46,9 @@ def Create_J(Nx, sp, Jtype, SelfCoupling):
         J = J/np.sqrt(Nx)
         
     # Apply mask
-    if sp != 0:
-        J = J*H
+    J = J*H
+    # if sp != 0:
+    #     J = J*H
         
     return J
 
@@ -132,6 +133,36 @@ def runTAP(x0, hMat, Qpr, Qobs, theta, nltype):
 
     return xMat, rMat
 
+def generateinputs(Ny,T,scaling,smoothing_filter):
+    """
+    Function to generate y(t), the input to the TAP dynamics
+    inputs: 
+    Ny:               No. of input variables
+    T:                No. of time steps
+    scaling:          scaling parameter of the gamma distribution
+    smoothing_filter: filter used on raw input sequence
+    """    
+
+    shape = 1 # gamma shape parameter
+    count = 0
+
+    yMat = np.zeros([Ny,T])
+
+    while count < T:
+        T_const = np.random.randint(2,20)
+        # y_const = np.random.gamma(shape,scaling,(Ny))*np.random.randn(Ny)
+        y_const = np.random.gamma(shape,scaling)*np.random.randn(Ny)
+        for t in range(T_const):
+            if count > T-1:
+                break
+            yMat[:,count] = y_const
+            count += 1
+
+
+    yMat = signal.filtfilt( smoothing_filter, 1, yMat )
+    
+    return yMat
+
 
 def generate_trainingdata(theta, params, B, T, T_clip):
     """
@@ -146,7 +177,8 @@ def generate_trainingdata(theta, params, B, T, T_clip):
     gain_y = params['gain_y']
     smoothing_filter = params['smoothing_filter']
 
-    T_const = np.random.randint(low=2,high=20,size=(B))
+    # T_const = np.random.randint(low=2,high=20,size=(B))
+    T_const = np.random.randint(low=2,high=5,size=(B))
 
     y = np.zeros([Ny, T + T_clip, B])
 
@@ -159,6 +191,7 @@ def generate_trainingdata(theta, params, B, T, T_clip):
 
     for bi in range(B):
         y[:,:,bi] = signal.filtfilt( smoothing_filter, 1, generateBroadH(Ny, T + T_clip, T_const[bi], gain_y) )
+        # y[:,:,bi] = generateinputs(Ny,T + T_clip, gain_y, smoothing_filter)
         x[:,:,bi], r[:,:,bi] = runTAP(x0[:,bi], y[:,:,bi], Q_process, Q_obs, theta, nltype)
 
 

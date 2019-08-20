@@ -32,6 +32,7 @@ def generatedata(brain, theta, params, use_cuda, B, T, T_clip):
 
     return y, x, r_brain
 
+
 def loadbrain(fname, use_cuda):
 
     """
@@ -75,3 +76,11 @@ def runparticlefilter(r_brain, y, theta, params):
     return LL_dec, x_dec, r_dec, P_dec, W_dec
 
 
+
+def runNegLL(theta, r, y, particles, weights, params, computegrad, alpha_J, alpha_G):
+    C = 0
+    B = r.shape[2]
+    for b in range(B):
+        C += NegLL(theta, r[...,b], y[...,b], particles[...,b], weights[...,b], params['Q_process'], params['Q_obs'], params['nltype'], computegrad, alpha_J, alpha_G)  
+    return C
+    
