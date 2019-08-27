@@ -355,82 +355,78 @@ def NegLL_D(theta, rMat, hMat, P_S, WVec, P, M, nltype, computegrad, alpha_J, al
 
 
 
-def particlefilter_torch(G, J, U, V, lam, r, y, Q_process, Q_obs, Np, device, dtype):
+def particlefilter_torch(G, J, U, V, lam, r, y, P_process, P_obs, Np):
 
     """
     add description later
     """
 
-    B, Nr, T = r.shape
-    Ns       = J.shape[0]
-    Ny       = y.shape[1]
-    Np       = 100 # No. of particles
+    B, Nr, T    = r.shape
+    Ns          = J.shape[0]
+    Ny          = y.shape[1]
+    device      = r.device 
+    dtype       = r.dtype
+    sigmoid     = torch.nn.Sigmoid()
 
+    UT          = U.t()
+    J2          = J**2
 
-    UT = U.t()
-    J2 = J**2
+    logWVec	  	= torch.tensor(-np.ones([B,Np])*np.log(Np),device=device,dtype=dtype) # initialize log weights
+    Pinv        = P_process
+    P_post      = P_process + torch.mm(UT,torch.mm(P_obs, U))
+    P_post      = (P_post + P_post.t())/2 # make it perfectly symmetric
+    Q_post    	= P_post.inverse()
 
+    LL          = 0 # Log likelihood
+    T_st        = 0 # time after which to compute likelihood, burn in time of the PF)
 
-    WVec      = torch.ones((B,Np),device=device,dtype=dtype)/Np
-    Pinv      = torch.pinverse(Q_process)
-    Q_postinv = Pinv + torch.mm(UT,torch.mm(Q_obs.inverse(),U))
-    Q_post    = Q_postinv.inverse()
-    Q_post    = (Q_post + Q_post.t())/2 # make it perfectly symmetric
-
-    mvn_process   = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), covariance_matrix = Q_process)
-    mvn_posterior = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), covariance_matrix = Q_post)
-
-    posterior_samples = mvn_posterior.rsample(sample_shape=torch.Size([B,Np,T])).permute(0,3,1,2)
-
-    # x = torch.matmul(r[:,:,0].unsqueeze(1),torch.pinverse(UT)) + mvn_process.rsample(sample_shape=torch.Size([B,Np]))
-    x = torch.matmul(torch.pinverse(U),r[:,:,0].unsqueeze(2)) + mvn_process.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1)
-
-    ParticlesAll = torch.zeros((B,Ns,Np,T+1),device=device,dtype=dtype)
+    mvn_process     = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), precision_matrix = P_process)
+    mvn_posterior   = MVN.MultivariateNormal(loc = torch.zeros(Ns,device=device,dtype=dtype), precision_matrix = P_post)
+    x               = torch.matmul(torch.pinverse(U),r[:,:,0].unsqueeze(2)) + mvn_process.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1) # initial samples of x
+    ParticlesAll    = torch.zeros((B,Ns,Np,T+1),device=device,dtype=dtype)
     ParticlesAll[...,0] = x
 
-    LL = 0 # Log likelihood
-
-    sigmoid = torch.nn.Sigmoid()
-
-    T_st    = 0 # time after which to compute likelihood (sort of like burn in time of the PF)
-
-    # begin the for loop
 
     for tt in range(T):
 
-        yt = y[...,tt]
-        rt = r[...,tt]
+        yt      = y[...,tt]
+        rt      = r[...,tt]
 
-        Minvr  = torch.matmul(Q_obs.inverse(),rt.unsqueeze(2))# size B x Nr x 1
-        rMinvr = torch.matmul(rt.unsqueeze(1),Minvr)          # size B x 1  x 1
-        UMinvr = torch.matmul(UT,Minvr)                       # size B x Ns x 1
+        Minvr   = torch.matmul(P_obs,rt.unsqueeze(2))            # size B x Nr x 1
+        rMinvr  = torch.matmul(rt.unsqueeze(1),Minvr)            # size B x 1  x 1
+        UMinvr  = torch.matmul(UT,Minvr)                         # size B x Ns x 1
 
-        x2   = x**2
-        J1   = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-        Jx   = torch.matmul(J,x)
-        Jx2  = torch.matmul(J,x2)
-        J21  = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-        J2x  = torch.matmul(J2,x)
-        J2x2 = torch.matmul(J2,x2)
+        x2      = x**2
+        J1      = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        Jx      = torch.matmul(J,x)
+        Jx2     = torch.matmul(J,x2)
+        J21     = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        J2x     = torch.matmul(J2,x)
+        J2x2    = torch.matmul(J2,x2)
 
-        argf = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+        argf    = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
 
         outmat    = sigmoid(argf)
         f_tap     = (1-lam)*x + lam*outmat
-        Pinvf_tap = torch.matmul(Pinv, f_tap)
+        Pinvf_tap = torch.matmul(P_process, f_tap)
         v         = Pinvf_tap + UMinvr
         mu_post   = torch.matmul(Q_post,v) # mean of the proposal distribution
 
         # sample new particles from proposal distribution
-        # ParticlesNew = mu_post + mvn_posterior.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1)
-        ParticlesNew = mu_post + posterior_samples[...,tt]
+        ParticlesNew = mu_post + mvn_posterior.rsample(sample_shape=torch.Size([B,Np])).permute(0,2,1)
 
-        # assign weights to particles proportional to p(r(t)|x(t-1))
-        WVec = WVec*(torch.exp(-0.5*(rMinvr.squeeze(2) + torch.sum(f_tap*Pinvf_tap - v*mu_post,dim=1))) + 1e-38)
+        # assign weights to particles proportional to p(r(t)|x(t-1)): update weights in log domain first
+        logWVec 	+= -0.5*(rMinvr.squeeze(2) + torch.sum(f_tap*Pinvf_tap - v*mu_post,dim=1))
+        #logWmean 	= torch.mean(logWVec,dim=1)
+        logWmean    = torch.min(logWVec,dim=1)[0]
+        logWVec 	-= logWmean.unsqueeze(1)
+        
+        # convert weights from log
+        WVec 		= torch.exp(logWVec)
 
         # update log likelihood
         if tt >= T_st:
-            LL = LL + torch.log(torch.sum(WVec,dim=1))
+            LL += torch.log(torch.sum(WVec,dim=1)) + logWmean
 
         # normalize the weights
         WVec = WVec/torch.sum(WVec,dim=1).unsqueeze(1) 
@@ -438,36 +434,38 @@ def particlefilter_torch(G, J, U, V, lam, r, y, Q_process, Q_obs, Np, device, dt
         # append particles
         ParticlesAll[...,tt+1] = ParticlesNew
 
-
         # resample particles based on their weights
         ESS = 1/torch.sum(WVec**2,dim=1)
 
         for b in range(B):
-            if ESS[b] < Np/2 and tt != T-1:
+            if ESS[b] < Np/4 and tt != T-1:
                 idx = resampleSystematic_torch(WVec[b],Np, device, dtype)
                 ParticlesAll[b,:,:,0:tt+1] = ParticlesAll[b,:,idx,0:tt+1] 
                 WVec[b] = torch.ones(Np,device=device,dtype=dtype)/Np
 
+        # convert weights back to log scale
+        logWVec = torch.log(WVec)
 
         x = ParticlesAll[...,tt+1]
-
-        
-
+ 
     xhat = torch.sum(ParticlesAll*WVec.view(B,1,Np,1), dim=2).squeeze(2)
     
     return LL, xhat, ParticlesAll, WVec
 
 
-def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, Q_process, Q_obs, device, dtype):
+def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, P_process, P_obs):
 
     """
     add description later
     """
     
     B,Nr,T  = r.shape
-    Ns      = Q_process.shape[0]
+    Ns      = J.shape[0]
     Ny      = y.shape[1]
     Np      = Particles.shape[2] # No. of particles
+
+    device  = r.device
+    dtype   = r.dtype
     
     UT      = U.t()
     J2      = J**2
@@ -478,8 +476,6 @@ def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, Q_process, Q_obs,
 
     sigmoid = torch.nn.Sigmoid()
     
-    Pinv    = torch.inverse(Q_process)
-    Oinv    = torch.inverse(Q_obs)
 
     T_st    = 0 # time after which to compute likelihood (sort of like burn in time of the PF)
         
@@ -491,15 +487,15 @@ def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, Q_process, Q_obs,
         x       = Particles[...,t]
         x_curr  = Particles[...,t+1]
 
-        x2   = x**2
-        J1   = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-        Jx   = torch.matmul(J,x)
-        Jx2  = torch.matmul(J,x2)
-        J21  = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-        J2x  = torch.matmul(J2,x)
-        J2x2 = torch.matmul(J2,x2)
+        x2      = x**2
+        J1      = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        Jx      = torch.matmul(J,x)
+        Jx2     = torch.matmul(J,x2)
+        J21     = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+        J2x     = torch.matmul(J2,x)
+        J2x2    = torch.matmul(J2,x2)
 
-        argf = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+        argf    = torch.matmul(V,yt.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
         
         outmat  = sigmoid(argf)
         x_pred  = (1-lam)*x + lam*outmat
@@ -509,14 +505,8 @@ def Qfunction_torch(G, J, U, V, lam, r, y, Particles, Weights, Q_process, Q_obs,
 
         # update the cost
         if t >= T_st:
-            C1 += 0.5*torch.sum(dx*torch.matmul(Pinv,dx)*Weights.unsqueeze(1))
-            C2 += 0.5*torch.sum(dr*torch.matmul(Oinv,dr)*Weights.unsqueeze(1))
-
-        # C1 += 0.5*torch.sum(torch.sum(dx*torch.matmul(Pinv,dx),dim=1)*Weights)
-        # C2 += 0.5*torch.sum(torch.sum(dr*torch.matmul(Oinv,dr),dim=1)*Weights)
-        
-        # C1 = C1 + 0.5*np.dot(np.sum(dx*np.linalg.solve(P,dx),axis=0), WVec)
-        # C2 = C2 + 0.5*np.dot(np.sum(dr*np.linalg.solve(M,dr),axis=0), WVec)
+            C1 += 0.5*torch.sum(dx*torch.matmul(P_process,dx)*Weights.unsqueeze(1))
+            C2 += 0.5*torch.sum(dr*torch.matmul(P_obs,dr)*Weights.unsqueeze(1))        
 
     # Add the L1 norms of G and J
     C = C1 + C2

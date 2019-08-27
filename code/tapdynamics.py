@@ -202,3 +202,36 @@ def generate_trainingdata(theta, params, B, T, T_clip):
     r = torch.tensor(r.transpose(2,1,0), dtype=torch.float32) # target neural activity
 
     return x, y, r
+
+def generate_trainingdata_numpy(theta, params, B, T, T_clip, T_const_low, T_const_high):
+    """
+    Generate training and validation data
+    """
+    Ns = params['Ns']
+    Ny = params['Ny']
+    Nr = params['Nr']
+    Q_process = params['Q_process']
+    Q_obs = params['Q_obs']
+    nltype = params['nltype']
+    gain_y = params['gain_y']
+    smoothing_filter = params['smoothing_filter']
+
+    # T_const = np.random.randint(low=2,high=20,size=(B))
+    T_const = np.random.randint(low=T_const_low,high=T_const_high,size=(B))
+
+    y = np.zeros([Ny, T + T_clip, B])
+
+    # Initial values of latent dynamics
+    x0 = np.random.rand(Ns,B)
+
+    # Initialize arrays to save dynamics
+    x = np.zeros([Ns, T + T_clip + 1, B])
+    r = np.zeros([Nr, T + T_clip , B])
+
+    for bi in range(B):
+        y[:,:,bi] = signal.filtfilt( smoothing_filter, 1, generateBroadH(Ny, T + T_clip, T_const[bi], gain_y) )
+        x[:,:,bi], r[:,:,bi] = runTAP(x0[:,bi], y[:,:,bi], Q_process, Q_obs, theta, nltype)
+
+
+
+    return x, y, r
