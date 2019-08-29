@@ -8,6 +8,7 @@ scripts/oldscripts
 notebooks/Analysis
 notebooks/Experiments
 notebooks/Example-results
+figures
 
 # But include these example data files
 !data/brains/Ns_5_noiseseed_0.pt
