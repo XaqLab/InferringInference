@@ -13,8 +13,8 @@ import torch
 def nonlinearity(x,nltype):
 
     if nltype == 'sigmoid':
-        y = 1/(1 + np.exp(-x))
-        dy = y*(1-y)
+        y   = 1/(1 + np.exp(-x))
+        dy  = y*(1-y)
     elif nltype == 'expsqrt':
         y   = np.sqrt(np.log(1 + np.exp(x)))
         dy  = np.exp(x)/(y*(1+np.exp(x)))
@@ -24,6 +24,12 @@ def nonlinearity(x,nltype):
     elif nltype == 'xcauchytanh':
         y   = .5 + x/(1+x**2) + .05*np.tanh(x)
         dy  = 1/(1 + x**2) + x/((1 + x**2)**2) + 0.05*1/(np.cosh(x)**2)
+    elif nltype == 'linear':
+        y   = x
+        dy  = x*0 + 1
+    elif nltype == 'sine':
+        y   = np.sin(x)
+        dy  = np.cos(x)
     else:
         print('Nonlinearity unknown')
         
