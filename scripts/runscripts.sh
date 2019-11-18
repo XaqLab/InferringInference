@@ -1,6 +1,8 @@
-#!/bin/sh
 echo "Submitting simulations"
-for i in {0..2}
+ITERS="10"
+NSHAT="5"
+QOBS="0.05"
+for i in {0..15}
 do
-  python InferTAPbrain.py Ns_5_noiseseed_20 42 150 30 $i > "OutLogs/log_$i.txt" &
+	taskset --cpu-list $i python Loglikelihood-vs-Nshat.py $i $ITERS $NSHAT $QOBS > OutLogs/log-Nshat$NSHAT-trial$i.txt &
 done

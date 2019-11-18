@@ -50,7 +50,7 @@ def loadbrain(fname, use_cuda):
     """
     with open(fname + '_params.pkl','rb') as f:
         theta, params = pickle.load(f)
-    f.close()
+        f.close()
 
     return brain, theta, params
 
