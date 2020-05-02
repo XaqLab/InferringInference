@@ -1,172 +1,190 @@
 import sys
-import warnings
-warnings.filterwarnings('ignore')
-
-import sys
 sys.path.append('../code')
-
-from utils import *
 from rnnmodel import *
-from tapdynamics import *
+from plotutils import *
 
 
-def generateModelParameters(Ns, noise_seed):
-    """
-    Parameters and settings used to generate TAP dynamics
-    """
-    
-    Nr = 2*Ns  # No. of neurons
-    Ny = Ns+1  # No. of input variables
+def generateModelParameters(Ns, Nr, Ny, block_diagonalJ):
+	"""
+	Parameters and settings used to generate TAP dynamics
+	"""
+	# process and observation noise covariance matrices
+	q_process, q_obs = 0, 0
+	Q_process, Q_obs = q_process*np.eye(Ns), q_obs*np.eye(Nr)
 
-    # Noise covariances 
-    Q_process = 0*np.eye(Ns) # process noise
-    Q_obs = 0*np.eye(Nr)        # use zero noise in train inputs to RNN
-
-    # Input setting
-    gain_y = 25/np.sqrt(Ns) # gain for inputs y
-
-    # Filter used for smoothing the input signals
-    smoothing_filter = signal.hamming(5,sym=True) 
-    smoothing_filter = smoothing_filter/sum(smoothing_filter)
-
-    # TAP model parameters
-
-    lam = np.array([0.25])  # low pass filtering constant for the TAP dynamics
-
-    nltype = 'sigmoid' # external nonlinearity in TAP dynamics
-
-    G = np.array([0,2,0,0,0,0,0,0,0,0,4,-4,0,-8,8,0,0,0]) # message passing parameters of the TAP equation
-
-    self_coupling_on = 1 # self coupling in J ON
-    sparsity_J = 0.3     # sparsity in J 
-    Jtype = 'nonferr'
-    J = 3*Create_J(Ns, sparsity_J, Jtype, self_coupling_on) # Coupling matrix  
-
-    U = 2*np.random.rand(Nr,Ns) # embedding matrix
-    # U = np.eye(Nr)
-
-    V = np.linalg.svd(np.random.randn(Ns,Ny), full_matrices=False)[2] # input embedding matrix
-
-    # concatenate the parameters
-    theta = np.concatenate([lam, G, JMatToVec(J), U.flatten('F'), V.flatten('F') ])
-
-    params = {'Ny':Ny, 'Nr': Nr, 'Ns': Ns, 'Q_process': Q_process, 'Q_obs': Q_obs, 'nltype': nltype, 'Jtype':Jtype, 'sparsity_J': sparsity_J, 'self_coupling_on': self_coupling_on, 'gain_y':gain_y, 'smoothing_filter': smoothing_filter}
-
-    return theta, params
+	# filter used for smoothing the input signals
+	smoothing_filter = signal.hamming(5,sym=True) 
+	smoothing_filter = smoothing_filter/sum(smoothing_filter)
 
 
+	# ground truth TAP model parameters
 
+	lam = np.array([0.25])  # low pass filtering constant for the TAP dynamics
+
+	G   = np.array([0,2,0,0,0,0,0,0,0,0,4,-4,0,-8,8,0,0,0]) # message passing parameters of the TAP equation
+
+	if block_diagonalJ:
+		self_coupling_on, sparsity_J, gain_J, Jtype  = 1, 0, 3, 'nonferr'
+		J = np.zeros([Ns,Ns])
+		M = Ns//4
+		J[0:M,0:M] = 1*Create_J(M, sparsity_J, 'ferr', self_coupling_on)
+		J[M:2*M,M:2*M] = 1*Create_J(M, sparsity_J, 'antiferr', self_coupling_on)
+		J[2*M:,2*M:] = gain_J*Create_J(Ns-2*M, 0.25, 'nonferr', self_coupling_on)
+	else:
+		self_coupling_on, sparsity_J, gain_J, Jtype  = 1, 0.25, 3, 'nonferr' # interaction matrix settings
+		J 	= gain_J*Create_J(Ns, sparsity_J, Jtype, self_coupling_on) # interaction matrix 
+
+
+	gain_U = 3
+	U   = gain_U*np.random.rand(Nr,Ns) # embedding matrix
+
+	if Ns <= Ny:
+		V = np.linalg.svd(np.random.randn(Ns,Ny), full_matrices=False)[2]
+	else:
+		V = np.linalg.svd(np.random.randn(Ns,Ny), full_matrices=False)[0]
+
+	# concatenate parameters
+	theta = np.concatenate([lam, G, JMatToVec(J), U.flatten('F'), V.flatten('F') ])
+
+	params = {'Ns':Ns,'Ny':Ny,'Nr':Nr,'Q_process':Q_process,'Q_obs':Q_obs,'nltype':'sigmoid','smoothing_filter':smoothing_filter,'self_coupling_on':self_coupling_on,'sparsity_J':sparsity_J,'Jtype':Jtype }
+
+
+	return theta, params
 
 
 def createbrain(N_input, N_hidden, N_output, use_cuda):
-    """
-    Create RNN module
-    """
-    brain = RNN(N_input, N_hidden, N_output, use_cuda)
+	"""
+	Create RNN module
+	"""
+	brain = RNN(N_input, N_hidden, N_output, use_cuda)
 
-    if use_cuda and torch.cuda.is_available():
-        brain.cuda()
+	if use_cuda and torch.cuda.is_available():
+		brain.cuda()
 
-    return brain
-
-
-def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, T_clip, use_cuda, learningrate):
-
-    loss_fn = nn.MSELoss()
-    optimizer = optim.Adam(brain.parameters(),lr=learningrate, betas=(0.9, 0.999))
+	return brain
 
 
-    if use_cuda and torch.cuda.is_available():
-        y_train = y_train.cuda()
-        r_train = r_train.cuda()
-        y_val = y_val.cuda()
-        r_val = r_val.cuda()
+def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_clip, learning_rate, use_cuda):
 
-    t_st = time.time()
+	loss_fn = nn.MSELoss()
+	optimizer = optim.Adam(brain.parameters(), lr=learning_rate, betas=(0.9, 0.999))
 
-    train_loss, val_loss = np.zeros([NEpochs]), np.zeros([NEpochs])
+	# convert training data to torch tensors
+	y_train = torch.tensor(y_train.transpose(0,2,1), dtype=torch.float32) # input signal
+	r_train = torch.tensor(r_train.transpose(0,2,1), dtype=torch.float32) # target neural activity
 
-      
-    for epoch in range(NEpochs):
-        
-        optimizer.zero_grad() # zero-gradients at the start of each epoch
-        
-        # training data
-        rhat_train = brain(y_train)[0]
-        
-        mse_train = loss_fn(r_train[:,T_clip:],rhat_train[:,T_clip:])
-        
-        mse_train.backward()  # do backprop to compute gradients 
-        
-        optimizer.step() # optimization step
-        
-        # validation data
-        rhat_val = brain(y_val)[0]
-        
-        mse_val = loss_fn(r_val[:,T_clip:],rhat_val[:,T_clip:])
-        
-        # record loss
-        train_loss[epoch] = mse_train.item()
-        val_loss[epoch]   = mse_val.item()
-        
-        if epoch % 1000 == 999:
-            print('[%d] training loss: %.5f' %(epoch + 1, mse_train.item()))
+	y_val = torch.tensor(y_val.transpose(0,2,1), dtype=torch.float32) # input signal
+	r_val = torch.tensor(r_val.transpose(0,2,1), dtype=torch.float32) # target neural activity
 
-    print('Finished training')
-    t_en = time.time()
-    print('Time elapsed =', np.round(1000*(t_en - t_st))/1000, 's')
+	if use_cuda and torch.cuda.is_available():
+		y_train = y_train.cuda()
+		r_train = r_train.cuda()
+		y_val 	= y_val.cuda()
+		r_val 	= r_val.cuda()
 
-    return brain, train_loss, val_loss
 
+	train_loss, val_loss = [], []
+
+	t_st = time.time()
+
+	for epoch in range(NEpochs):
+
+		if epoch == NEpochs//2:
+			optimizer = optim.Adam(brain.parameters(), lr=learning_rate/2, betas=(0.9, 0.999))
+
+		if epoch == 3*NEpochs//4:
+			optimizer = optim.Adam(brain.parameters(), lr=learning_rate/4, betas=(0.9, 0.999))
+
+		
+		optimizer.zero_grad() # zero-gradients at the start of each epoch
+		
+		# training data
+		B_train 	= y_train.shape[0]
+		batch_index = torch.randint(0, B_train,(batch_size,))
+
+		rhat_train  = brain(y_train[batch_index])[0]
+		
+		mse_train = loss_fn(r_train[batch_index,T_clip:], rhat_train[:,T_clip:])
+		
+		mse_train.backward()  
+		
+		optimizer.step() 
+
+		if (epoch + 1) % 250 == 0: 
+			rhat_val = brain(y_val)[0]
+			mse_val  = loss_fn(r_val[:,T_clip:], rhat_val[:,T_clip:])
+			train_loss.append(mse_train.item())
+			val_loss.append(mse_val.item())
+		
+		if (epoch + 1) % 5000 == 0:
+			print('[%d] training loss: %.5f' %(epoch + 1, mse_train.item()))
+
+	print('Finished training')
+	t_en = time.time()
+	print('Time elapsed = %.2f s' %(t_en - t_st))
+	
+	brain.cpu()
+	brain.use_cuda = False
+		
+	return brain, train_loss, val_loss
 
 
 def main():
 
-    use_cuda = True
+	# Input parameters
+	noise_seed      = int(sys.argv[1]) 
+	Ns              = int(sys.argv[2]) 	# No. of latent variables
+	Nr              = int(sys.argv[3]) 	# No. of neurons
+	Ny              = int(sys.argv[4]) 	# No. of input variables
+	N_hidden        = int(sys.argv[5]) 	# No. of hidden units in the RNN
+	B_train 		= int(sys.argv[6]) 	# No. of training data batches
+	NEpochs         = int(sys.argv[7]) 	# No. of training epochs
+	batch_size 		= int(sys.argv[8]) 	# batch size for training
+	learning_rate   = float(sys.argv[9])
+	block_diagonalJ = int(sys.argv[10])  # 1 for block diagonal J matrix
 
-    # Input parameters
-    Ns              = int(sys.argv[1]) # No. of variables
-    noise_seed      = int(sys.argv[2])
-    N_hidden        = int(sys.argv[3]) 
-    NEpochs         = int(sys.argv[4])
-    learningrate    = int(sys.argv[5])*1e-5
+	B_val 			= 500      			# No. of batches in validation data
+	T 				= 50 				# No. of time steps in each batch 
+	T_clip  		= 20              	# No. of time steps to clip
+	T_low, T_high 	= 2, 5             	# range of time periods for which input is held constant
+	yG_low, yG_high = 5, 50          	# range of input gains
+	use_cuda 		= True 				# use cuda if available
 
-    print('noise_seed =',noise_seed)
-    np.random.seed(seed=noise_seed)
+	# set noise seed
+	np.random.seed(noise_seed)
+	torch.manual_seed(noise_seed)
+	print('noise_seed = %d' %(noise_seed))
 
+	# generate model parameters
+	theta, params   = generateModelParameters(Ns, Nr, Ny, block_diagonalJ)
 
-    theta, params   = generateModelParameters(Ns, noise_seed)
+	# generate training data
+	print('Generating training data ...')
+	y_train, _, r_train = generate_TAPdynamics(theta, params, B_train, T+T_clip, T_low, T_high, yG_low, yG_high)
+	y_val, _, r_val 	= generate_TAPdynamics(theta, params, B_val, T+T_clip, T_low, T_high, yG_low, yG_high)
 
-    B_train, B_val  = 1000, 100 # No. of batches
-    T_train, T_val  = 80, 80 # No. of time steps 
-    T_clip          = 20 # No. of time steps that will be clipped; corresponds to rnn burn in time
+	# create the tap brain 
+	tapbrain = createbrain(Ny, N_hidden, Nr, use_cuda)
 
-    y_train, r_train    = generate_trainingdata(theta, params, B_train, T_train, T_clip)[1:]
-    y_val, r_val        = generate_trainingdata(theta, params, B_train, T_train, T_clip)[1:]
- 
-    tapbrain = createbrain(params['Ny'], N_hidden, params['Nr'], use_cuda)
+	# train the tap brain
+	print('Training brain ... ')
+	tapbrain, train_loss, val_loss = trainbrain(tapbrain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_clip, learning_rate, use_cuda)
+	print('Training complete. Saving brain at')
 
-    print('learningrate =',learningrate)
-    print('Training brain ... ')
-    tapbrain, train_loss, val_loss = trainbrain(tapbrain, y_train, y_val, r_train, r_val, NEpochs, T_clip, use_cuda, learningrate)
-    print('Training complete. Saving brain at')
+	# save the tap brain
+	brain_name = '../data/brains/' + 'Ns_'+ str(Ns) + '_noiseseed_' + str(noise_seed)
+	torch.save(tapbrain, brain_name + '.pt')
+	print(brain_name + '.pt')
 
-    tapbrain.cpu()
+	# save the brain parameters
+	params['train_loss'] = train_loss
+	params['val_loss'] 	 = val_loss
 
-    brain_name = '../data/brains/' + 'Ns_'+ str(Ns) + '_noiseseed_' + str(noise_seed)
-    
-    torch.save(tapbrain, brain_name + '.pt')
-
-    params['train_loss'] = train_loss
-    params['val_loss'] = val_loss
-
-    print(brain_name + '.pt')
-
-    with open(brain_name + '_params.pkl', 'wb') as f:  
-        pickle.dump([theta, params], f)
-    f.close()
+	with open(brain_name + '_params.pkl', 'wb') as f:  
+		pickle.dump([theta, params], f)
+	f.close()
 
 
 
 if __name__ == "__main__":
-    main()
+	main()

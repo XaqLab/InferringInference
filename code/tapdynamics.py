@@ -4,234 +4,203 @@ from scipy import signal
 from utils import extractParams, nonlinearity
 
 
-def Create_J(Nx, sp, Jtype, SelfCoupling):
-    
-    """
-    Generate a sparse, symmetric coupling matrix with desired kind of interactions
+def Create_J(Ns, sparsity, Jtype, selfcoupling):
+	
+	"""
+	Generate a sparse, symmetric coupling matrix with desired kind of interactions
 
-    Inputs: 
-    Nx    : No. of x's
-    sp    : degree of sparsity of J
-    Jtype : coupling type - ferromagnetic (all positive), antiferr (all negative), nonferr (mixed)
-    SelfCoupling: determines if J matrix has self coupling or not
+	Inputs: 
+	Ns          : No. of latent variables
+	sparsity    : degree of sparsity of J
+	Jtype       : interaction type: ferr (all positive), antiferr (all negative), nonferr (mixed)
+	selfcoupling: determines if J matrix has self coupling or not
 
-    Output
-    J     : coupling matrix
-    """
+	Output
+	J : interaction matrix
+	"""
 
-    # Create the mask for zeros
-    H           = np.random.rand(Nx,Nx)
-    H[H < sp]   = 0
-    H[H >= sp]  = 1
-    H           = np.tril(H, k=-1)
-     
-    if (SelfCoupling == 1):
-        H = H + H.T + np.eye(Nx)
-    else:
-        H = H + H.T
-        
-    # Create full coupling matrix with required kind of interaction
-    
-    if Jtype == 'ferr':
-        J = np.tril(np.random.rand(Nx,Nx),-1)
-        J = J + J.T + np.diag(np.random.rand(Nx))
-        J = J/np.sqrt(Nx)
-    elif Jtype == 'antiferr':
-        J = -np.tril(np.random.rand(Nx,Nx),-1)
-        J = J + J.T - np.diag(np.random.rand(Nx))
-        J = J/np.sqrt(Nx)
-    else:
-        J = np.tril(0.5*np.random.randn(Nx,Nx),-1)
-        J = J + J.T + np.diag(0.5*np.random.randn(Nx))
-        J = J/np.sqrt(Nx)
-        
-    # Apply mask
-    J = J*H
-    # if sp != 0:
-    #     J = J*H
-        
-    return J
+	# Create the sparse
+	mask = np.tril((np.random.rand(Ns,Ns) >= sparsity)*1.0,k=-1)
+	mask += mask.T + np.eye(Ns)*(selfcoupling == 1) 
+
+	# Create full coupling matrix with required kind of interaction
+	
+	if Jtype == 'ferr':
+		J = np.tril(np.random.rand(Ns,Ns),-1)
+		J += J.T + np.diag(np.random.rand(Ns))
+	   
+	elif Jtype == 'antiferr':
+		J = -np.tril(np.random.rand(Ns,Ns),-1)
+		J += J.T - np.diag(np.random.rand(Ns))
+		
+	else:
+		J = np.tril(0.5*np.random.randn(Ns,Ns),-1)
+		J += J.T + np.diag(0.5*np.random.randn(Ns))
+		
+	# Apply mask, scale and return
+	return J*mask/np.sqrt(Ns)
 
 
-def generateBroadH(Nx,T,Th,scaling):
-    """
-    Function to generate h(t), the input to the TAP dynamics
-    Modeling h(t) such that it stays constant for every Nh time steps.
-    """    
+def generateBroadH(Ny,T,dT,scaling):
 
-    # First generate only T/Nh independent values of h
-    shape = 1 # gamma shape parameter
-    Lh = T//Th + 1*(T%Th != 0)
-    gsmScale = np.random.gamma(shape,scaling,(Nx,Lh))
-    hInd = gsmScale*np.random.randn(Nx,Lh)
-    hMat = np.zeros([Nx,T])
+	"""
+	Function to generate y(t), the input to the TAP dynamics
+	Modeling y(t) such that it stays constant for every dT time steps.
+	"""    
 
-    # Then repeat each independent h for Nh time steps
-    for t in range(T):
-        hMat[:,t] = hInd[:,t//Th]
-        
-    return hMat
+	# First generate only T/dT independent values of y
+	shape   = 1 # gamma shape parameter
+	L       = T//dT + 1*(T%dT != 0)
+	gammma  = np.random.gamma(shape,scaling,(Ny,L))
+	yInd    = gammma*np.random.randn(Ny,L)
+	yMat = np.zeros([Ny,T])
 
+	# Then repeat each independent h for Nh time steps
+	for t in range(T):
+		yMat[:,t] = yInd[:,t//dT]
+		
+	return yMat
 
-     
-    
-def runTAP(x0, hMat, Qpr, Qobs, theta, nltype):
+	
+def runTAP(yMat, Qpr, Qobs, theta, nltype):
 
-    """
-    % Function that generates the TAP dynamics
+	"""
+	Function that generates the TAP dynamics
 
-    % Inputs: 
-    % x0    : latent variables at time t = 0
-    % hMat  : of size Nx x T, specifies inputs h(t) for t = 1,..,T
-    % lam   : low pass fitlering constant for TAP dynamics
-    % Qpr   : covariance of process noise
-    % Qobs  : covariance of measurement noise
-    % U     : embedding matrix from latent space to neural activity
-    % V     : emedding matrix from input space to latent variable space
-    % J     : coupling matrix of the underlying distribution
-    % G     : global hyperparameters
+	Inputs: 
+	yMat  : of size B x Ny x T-1, specifies inputs y(t) for t = 0,..,T-2
+	Qpr   : covariance of process noise
+	Qobs  : covariance of observation noise
+	theta : parameters of the TAP dynamics
+	lam   : low pass fitlering constant for TAP dynamics
+	U     : embedding matrix from latent space to neural activity
+	V     : emedding matrix from input space to latent variable space
+	J     : coupling matrix of the underlying distribution
+	G     : global hyperparameters
+	nltype: outer nonlinearity in TAP dynamics
 
-    % Outputs: 
-    % xMat  : latent variables 
-    % rMat  : neural activity. r = Ux + noise
-    """
+	Outputs: 
+	xMat  : latent variables of shape B x Ns x T
+	"""
+	B  = yMat.shape[0] 		# no. of batches 
+	Ny = yMat.shape[1] 		# no. of input dimensions
+	T  = yMat.shape[2] + 1 	# no. of time steps
+	Ns = Qpr.shape[0]  		# no. of latent dimensions
+	Nr = Qobs.shape[0] 		# no. of output dimensions
 
-    Nh, T = hMat.shape # input dimensions, no. of time steps
-    Nx = Qpr.shape[0]  # latent dimensions
-    Nr = Qobs.shape[0] # output dimensions
+	lam, G, J, U, V = extractParams(theta, 18, Ns, Ny, Nr) # G has 18 parameters for now
 
-    lG = 18 # hard coded for now
-    lam, G, J, U, V = extractParams(theta, lG, Nx, Nh, Nr)
+	xMat 	= []
+	x 		= np.random.rand(Ns,B)
+	xMat.append(x)			
 
-    x = x0 # initial value of x
+	J2   = J**2
 
-    xMat = np.zeros([Nx,T+1])
-    xMat[:,0] = x0
+	for t in range(1,T):  
+		
+		y       = yMat[...,t-1].T # y should have shape Ny x B
 
-    J2 = J**2
+		x2      = x**2
+		J1      = np.expand_dims(np.dot(J,np.ones([Ns])),1)
+		Jx      = np.dot(J,x)
+		Jx2     = np.dot(J,x2)
+		J21     = np.expand_dims(np.dot(J2,np.ones([Ns])),1)
+		J2x     = np.dot(J2,x)
+		J2x2    = np.dot(J2,x2)
 
-    for tt in range(T):  
-        
-        ht = hMat[:,tt]
+		argf    = np.dot(V,y) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+		xnew    = (1-lam)*x + lam*nonlinearity(argf, nltype)[0] 
+		xnew    += np.random.multivariate_normal(np.zeros(Ns),Qpr,B).T
 
-        x2      = x**2
-        J1      = np.dot(J,np.ones([Nx]))
-        Jx      = np.dot(J,x)
-        Jx2     = np.dot(J,x2)
-        J21     = np.dot(J2,np.ones([Nx]))
-        J2x     = np.dot(J2,x)
-        J2x2    = np.dot(J2,x2)
+		xMat.append(xnew)
+		x 		= xnew
 
-        argf = np.dot(V,ht) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
-        
-        TAPFn = nonlinearity(argf, nltype)[0]
-        xnew = (1-lam)*x + lam*TAPFn + np.random.multivariate_normal(np.zeros(Nx),Qpr)
-        xMat[:,tt+1] = xnew
-        x = xnew
-
-    rMat = np.dot(U,xMat[:,1:]) + np.random.multivariate_normal(np.zeros(Nr),Qobs,T).T  #Adding independent observation noise to each time step
-
-    return xMat, rMat
-
-def generateinputs(Ny,T,scaling,smoothing_filter):
-    """
-    Function to generate y(t), the input to the TAP dynamics
-    inputs: 
-    Ny:               No. of input variables
-    T:                No. of time steps
-    scaling:          scaling parameter of the gamma distribution
-    smoothing_filter: filter used on raw input sequence
-    """    
-
-    shape = 1 # gamma shape parameter
-    count = 0
-
-    yMat = np.zeros([Ny,T])
-
-    while count < T:
-        T_const = np.random.randint(2,20)
-        # y_const = np.random.gamma(shape,scaling,(Ny))*np.random.randn(Ny)
-        y_const = np.random.gamma(shape,scaling)*np.random.randn(Ny)
-        for t in range(T_const):
-            if count > T-1:
-                break
-            yMat[:,count] = y_const
-            count += 1
+	return np.array(xMat).transpose(2,1,0)
 
 
-    yMat = signal.filtfilt( smoothing_filter, 1, yMat )
-    
-    return yMat
+def generate_TAPdynamics(theta, modelparameters, B, T, T_low, T_high, yG_low, yG_high):
+	
+	"""
+	Function that generates the TAP dynamics
+	Inputs: 
+	theta : TAP dynamics parameters
+	modelparameters 
+	B : no. of batches of data
+	T : no. of time steps in each batch
+	T_low to T_high: range of time period for which the input signal is held constant
+	yG_low to y_high: range of input signal gain
+
+	Outputs: 
+	y  : input signal           - shape B x Ny x T
+	x  : latent dynamics        - shape B x Ns x T
+	r  : linear embedding of x  - shape B x Nr x T
+
+	"""
+
+	Ns 			= modelparameters['Ns']
+	Ny 			= modelparameters['Ny']
+	Nr 			= modelparameters['Nr']
+	Q_process   = modelparameters['Q_process']
+	Q_obs       = modelparameters['Q_obs']
+	nltype      = modelparameters['nltype']
+	smoother    = modelparameters['smoothing_filter']
+
+	U = extractParams(theta, 18, Ns, Ny, Nr)[3] # embedding matrix
+
+	y, x, r = [], [], []
+
+	for b in range(B):
+		T_const = np.random.randint(low=T_low,high=T_high)
+		y_gain  = np.random.randint(low=yG_low,high=yG_high) if (yG_low < yG_high) else yG_low
+		y_gain  = y_gain/np.sqrt(Ns)
+		y_b     = signal.filtfilt(smoother, 1, generateBroadH(Ny, T-1, T_const, y_gain))
+		y.append(y_b)		
+
+	y = np.array(y)
+
+	x = runTAP(y, Q_process, Q_obs, theta, nltype) # run inputs through TAP dynamics
+
+	r = torch.matmul(torch.tensor(U),torch.tensor(x)).data.numpy()
+	r += np.random.multivariate_normal(np.zeros(Nr),Q_obs,(B,T)).transpose(0,2,1)
+
+	return y, x, r
 
 
-def generate_trainingdata(theta, params, B, T, T_clip):
-    """
-    Generate training and validation data
-    """
-    Ns = params['Ns']
-    Ny = params['Ny']
-    Nr = params['Nr']
-    Q_process = params['Q_process']
-    Q_obs = params['Q_obs']
-    nltype = params['nltype']
-    gain_y = params['gain_y']
-    smoothing_filter = params['smoothing_filter']
+def generate_TAPbrain_dynamics(brain, theta, modelparameters, B, T, T_low, T_high, yG_low, yG_high, T_clip, use_cuda):
 
-    # T_const = np.random.randint(low=2,high=20,size=(B))
-    T_const = np.random.randint(low=2,high=5,size=(B))
+	"""
+	Function that generates the TAP brain dynamics
 
-    y = np.zeros([Ny, T + T_clip, B])
-
-    # Initial values of latent dynamics
-    x0 = np.random.rand(Ns,B)
-
-    # Initialize arrays to save dynamics
-    x = np.zeros([Ns, T + T_clip + 1, B])
-    r = np.zeros([Nr, T + T_clip , B])
-
-    for bi in range(B):
-        y[:,:,bi] = signal.filtfilt( smoothing_filter, 1, generateBroadH(Ny, T + T_clip, T_const[bi], gain_y) )
-        # y[:,:,bi] = generateinputs(Ny,T + T_clip, gain_y, smoothing_filter)
-        x[:,:,bi], r[:,:,bi] = runTAP(x0[:,bi], y[:,:,bi], Q_process, Q_obs, theta, nltype)
+	Inputs: 
+	brain : PyTorch model of the trained TAP brain
+	theta : TAP dynamics parameters
+	modelparameters 
+	B : no. of batches of data
+	T : no. of time steps in each batch
+	T_low to T_high: range of time period for which the input signal is held constant
+	yG_low to y_high: range of input signal gain
+	T_clip : no. of time steps to clip to account for burn in period of the TAP brain
+	use_cuda
 
 
-    """
-    Convert ground truth dynamics data to torch tensors
-    """    
-    y = torch.tensor(y.transpose(2,1,0), dtype=torch.float32) # input signal
-    r = torch.tensor(r.transpose(2,1,0), dtype=torch.float32) # target neural activity
+	Outputs:
+	y  : input signal           - shape B x Ny x T
+	x  : latent dynamics        - shape B x Ns x T
+	r  : TAP brain dynamics     - shape B x Nr x T 
 
-    return x, y, r
+	"""
 
-def generate_trainingdata_numpy(theta, params, B, T, T_clip, T_const_low, T_const_high):
-    """
-    Generate training and validation data
-    """
-    Ns = params['Ns']
-    Ny = params['Ny']
-    Nr = params['Nr']
-    Q_process = params['Q_process']
-    Q_obs = params['Q_obs']
-    nltype = params['nltype']
-    gain_y = params['gain_y']
-    smoothing_filter = params['smoothing_filter']
+	# generate input data and latent dynamics
+	y, x, _ = generate_TAPdynamics(theta, modelparameters, B, T+T_clip, T_low, T_high, yG_low, yG_high)
 
-    # T_const = np.random.randint(low=2,high=20,size=(B))
-    T_const = np.random.randint(low=T_const_low,high=T_const_high,size=(B))
+	# pass the inputs through the brain
+	r = brain(torch.tensor(y.transpose(0,2,1), dtype=torch.float32))[0]
 
-    y = np.zeros([Ny, T + T_clip, B])
+	# convert to numpy array
+	r = r.cpu().data.numpy().transpose(0,2,1)
 
-    # Initial values of latent dynamics
-    x0 = np.random.rand(Ns,B)
-
-    # Initialize arrays to save dynamics
-    x = np.zeros([Ns, T + T_clip + 1, B])
-    r = np.zeros([Nr, T + T_clip , B])
-
-    for bi in range(B):
-        y[:,:,bi] = signal.filtfilt( smoothing_filter, 1, generateBroadH(Ny, T + T_clip, T_const[bi], gain_y) )
-        x[:,:,bi], r[:,:,bi] = runTAP(x0[:,bi], y[:,:,bi], Q_process, Q_obs, theta, nltype)
-
-
-
-    return x, y, r
+	# add independent noise to r
+	r += np.random.multivariate_normal(np.zeros(modelparameters['Nr']),modelparameters['Q_obs'],[T+T_clip,B]).transpose(1,2,0)
+	
+	# return clipped arrays
+	return y[...,T_clip:], x[...,T_clip:], r[...,T_clip:]
