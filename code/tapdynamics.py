@@ -194,7 +194,8 @@ def generate_TAPbrain_dynamics(brain, theta, modelparameters, B, T, T_low, T_hig
 	y, x, _ = generate_TAPdynamics(theta, modelparameters, B, T+T_clip, T_low, T_high, yG_low, yG_high)
 
 	# pass the inputs through the brain
-	r = brain(torch.tensor(y.transpose(0,2,1), dtype=torch.float32))[0]
+	with torch.no_grad():
+		r = brain(torch.tensor(y.transpose(0,2,1), dtype=torch.float32))[0]
 
 	# convert to numpy array
 	r = r.cpu().data.numpy().transpose(0,2,1)

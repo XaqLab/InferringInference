@@ -4,7 +4,7 @@ from rnnmodel import *
 from plotutils import *
 
 
-def generateModelParameters(Ns, Nr, Ny, block_diagonalJ):
+def generateModelParameters(Ns, Nr, Ny, block_diagonalJ, model_type):
 	"""
 	Parameters and settings used to generate TAP dynamics
 	"""
@@ -34,9 +34,12 @@ def generateModelParameters(Ns, Nr, Ny, block_diagonalJ):
 		self_coupling_on, sparsity_J, gain_J, Jtype  = 1, 0.25, 3, 'nonferr' # interaction matrix settings
 		J 	= gain_J*Create_J(Ns, sparsity_J, Jtype, self_coupling_on) # interaction matrix 
 
-
-	gain_U = 3
-	U   = gain_U*np.random.rand(Nr,Ns) # embedding matrix
+	if model_type:
+		gain_U = 1
+		U   = gain_U*np.random.randn(Nr,Ns) # embedding matrix
+	else:
+		gain_U = 3
+		U   = gain_U*np.random.rand(Nr,Ns) # embedding matrix
 
 	if Ns <= Ny:
 		V = np.linalg.svd(np.random.randn(Ns,Ny), full_matrices=False)[2]
@@ -66,8 +69,12 @@ def createbrain(N_input, N_hidden, N_output, use_cuda):
 
 def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_clip, learning_rate, use_cuda):
 
-	loss_fn = nn.MSELoss()
-	optimizer = optim.Adam(brain.parameters(), lr=learning_rate, betas=(0.9, 0.999))
+	loss_fn   	= nn.MSELoss()
+	optimizer 	= optim.Adam(brain.parameters(), lr=learning_rate, betas=(0.9, 0.999))
+
+	B_train 	= y_train.shape[0]
+	epoch 		= B_train//batch_size 	# no. of iterations in one epoch
+	NIterations = epoch*NEpochs 		# total no. of iterations
 
 	# convert training data to torch tensors
 	y_train = torch.tensor(y_train.transpose(0,2,1), dtype=torch.float32) # input signal
@@ -87,19 +94,21 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 
 	t_st = time.time()
 
-	for epoch in range(NEpochs):
+	
 
-		if epoch == NEpochs//2:
+	for iteration in range(NIterations):
+
+		if iteration == NIterations//2:
 			optimizer = optim.Adam(brain.parameters(), lr=learning_rate/2, betas=(0.9, 0.999))
 
-		if epoch == 3*NEpochs//4:
+		if iteration == 3*NIterations//4:
 			optimizer = optim.Adam(brain.parameters(), lr=learning_rate/4, betas=(0.9, 0.999))
 
 		
-		optimizer.zero_grad() # zero-gradients at the start of each epoch
+		optimizer.zero_grad() # zero-gradients at the start of each iteration
 		
 		# training data
-		B_train 	= y_train.shape[0]
+		
 		batch_index = torch.randint(0, B_train,(batch_size,))
 
 		rhat_train  = brain(y_train[batch_index])[0]
@@ -110,14 +119,15 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 		
 		optimizer.step() 
 
-		if (epoch + 1) % 250 == 0: 
-			rhat_val = brain(y_val)[0]
-			mse_val  = loss_fn(r_val[:,T_clip:], rhat_val[:,T_clip:])
+		if (iteration + 1) % epoch == 0:
+			with torch.no_grad(): 
+				rhat_val = brain(y_val)[0]
+				mse_val  = loss_fn(r_val[:,T_clip:], rhat_val[:,T_clip:])
 			train_loss.append(mse_train.item())
 			val_loss.append(mse_val.item())
 		
-		if (epoch + 1) % 5000 == 0:
-			print('[%d] training loss: %.5f' %(epoch + 1, mse_train.item()))
+		if (iteration + 1) % 5000 == 0:
+			print('[%d] training loss: %.5f' %(iteration + 1, mse_train.item()))
 
 	print('Finished training')
 	t_en = time.time()
@@ -138,10 +148,11 @@ def main():
 	Ny              = int(sys.argv[4]) 	# No. of input variables
 	N_hidden        = int(sys.argv[5]) 	# No. of hidden units in the RNN
 	B_train 		= int(sys.argv[6]) 	# No. of training data batches
-	NEpochs         = int(sys.argv[7]) 	# No. of training epochs
+	NEpochs     	= int(sys.argv[7]) 	# No. of training epochs
 	batch_size 		= int(sys.argv[8]) 	# batch size for training
 	learning_rate   = float(sys.argv[9])
-	block_diagonalJ = int(sys.argv[10])  # 1 for block diagonal J matrix
+	block_diagonalJ = int(sys.argv[10]) # 1 for block diagonal J matrix
+	model_type 		= int(sys.argv[11]) # training data model - 1: Ux + b, 0: Ux	
 
 	B_val 			= 500      			# No. of batches in validation data
 	T 				= 50 				# No. of time steps in each batch 
@@ -156,12 +167,18 @@ def main():
 	print('noise_seed = %d' %(noise_seed))
 
 	# generate model parameters
-	theta, params   = generateModelParameters(Ns, Nr, Ny, block_diagonalJ)
+	theta, params   = generateModelParameters(Ns, Nr, Ny, block_diagonalJ, model_type)
 
 	# generate training data
 	print('Generating training data ...')
 	y_train, _, r_train = generate_TAPdynamics(theta, params, B_train, T+T_clip, T_low, T_high, yG_low, yG_high)
 	y_val, _, r_val 	= generate_TAPdynamics(theta, params, B_val, T+T_clip, T_low, T_high, yG_low, yG_high)
+
+	# add basline activity to the targets
+	baseline = -np.min(r_train) if model_type else 0
+	r_train += baseline
+	r_val 	+= baseline
+
 
 	# create the tap brain 
 	tapbrain = createbrain(Ny, N_hidden, Nr, use_cuda)
@@ -179,6 +196,7 @@ def main():
 	# save the brain parameters
 	params['train_loss'] = train_loss
 	params['val_loss'] 	 = val_loss
+	params['baseline'] 	 = baseline
 
 	with open(brain_name + '_params.pkl', 'wb') as f:  
 		pickle.dump([theta, params], f)
