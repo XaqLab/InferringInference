@@ -1,45 +1,8 @@
 import numpy as np
 from utils import *
+from tapdynamics import TAPnonlinearity
 import torch
 import torch.distributions.multivariate_normal as MVN
-
-
-def TAPnonlinearity(x,y,G,J,V,lam):
-
-	"""
-	function that computes the TAP nonlinearity
-	x_i(t+1) = (1-lam)*x_i(t) + lam*sigmoid(sum_{j,a,b,c} G_{abc}J_{ij}^a x_i(t)^b x_j(t)^c + (Vy(t))_i ) for i=1 to N_s
-	
-	inputs:
-	x : tensor of shape B x Ns x Np (B, Ns, Np = no. of batches, x varibles , particles)
-	y : tensor of shape B x Ny      (Ny = no. of input variables)
-	G : message passing parameters
-	J : interaction matrix, tensor of shape Ns x Ns
-	V : input mapping matrix, tensor of shape Ns x Ny
-	lam: low pass filtering constant for TAP dynamics 
-
-	output: 
-	x(t+1) : tensor of shape B x Ns x Np
-
-	"""
-
-	Ns      = x.shape[1]
-	device  = x.device 
-	dtype   = x.dtype
-	sigmoid = torch.nn.Sigmoid()
-	J2      = J**2
-	x2      = x**2
-	J1      = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-	Jx      = torch.matmul(J,x)
-	Jx2     = torch.matmul(J,x2)
-	J21     = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
-	J2x     = torch.matmul(J2,x)
-	J2x2    = torch.matmul(J2,x2)
-
-	argf    = torch.matmul(V,y.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
-	
-	return (1-lam)*x + lam*sigmoid(argf)
-
 
 
 def particlefilter(G, J, U, V, lam, r, y, P_process, P_obs, Np):
@@ -157,7 +120,7 @@ def particlefilter(G, J, U, V, lam, r, y, P_process, P_obs, Np):
 		rMinvr      = torch.matmul(rt.unsqueeze(1),Minvr)            # size B x 1  x 1
 		UMinvr      = torch.matmul(U.t(),Minvr)                      # size B x Ns x 1
 
-		f_tap       = TAPnonlinearity(x,yt,G,J,V,lam)
+		f_tap       = TAPnonlinearity(x,yt.unsqueeze(2),G,J,V,lam)
 
 		Pinvf_tap   = torch.matmul(P_process, f_tap)
 		v           = Pinvf_tap + UMinvr
@@ -233,7 +196,7 @@ def Qfunction(G, J, U, V, lam, r, y, Particles, Weights, P_process, P_obs):
 		x       = Particles[...,t-1]
 		x_curr  = Particles[...,t]
 
-		x_pred  = TAPnonlinearity(x,yt,G,J,V,lam)
+		x_pred  = TAPnonlinearity(x,yt.unsqueeze(2),G,J,V,lam)
 
 		dx      = x_curr - x_pred
 		dr      = rt.unsqueeze(2)- torch.matmul(U,x_curr)

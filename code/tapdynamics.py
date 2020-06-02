@@ -62,12 +62,13 @@ def generateBroadH(Ny,T,dT,scaling):
 	return yMat
 
 	
-def runTAP(yMat, Qpr, Qobs, theta, nltype):
+def runTAP(x0, yMat, Qpr, Qobs, theta, nltype):
 
 	"""
 	Function that generates the TAP dynamics
 
 	Inputs: 
+	x0 	  : initial value of xt, of size Nx x B
 	yMat  : of size B x Ny x T-1, specifies inputs y(t) for t = 0,..,T-2
 	Qpr   : covariance of process noise
 	Qobs  : covariance of observation noise
@@ -91,7 +92,8 @@ def runTAP(yMat, Qpr, Qobs, theta, nltype):
 	lam, G, J, U, V = extractParams(theta, 18, Ns, Ny, Nr) # G has 18 parameters for now
 
 	xMat 	= []
-	x 		= np.random.rand(Ns,B)
+	#x 		= np.random.rand(Ns,B)
+	x 		= x0
 	xMat.append(x)			
 
 	J2   = J**2
@@ -116,6 +118,27 @@ def runTAP(yMat, Qpr, Qobs, theta, nltype):
 		x 		= xnew
 
 	return np.array(xMat).transpose(2,1,0)
+
+
+def generate_Input(modelparameters, B, T, T_low, T_high, yG_low, yG_high):
+
+	"""
+	Function that generates the inputs to the TAP brain
+	"""
+	Ns 			= modelparameters['Ns']
+	Ny 			= modelparameters['Ny']
+	smoother    = modelparameters['smoothing_filter']
+
+	y = []
+
+	for b in range(B):
+		T_const = np.random.randint(low=T_low,high=T_high)
+		y_gain  = np.random.randint(low=yG_low,high=yG_high) if (yG_low < yG_high) else yG_low
+		y_gain  = y_gain/np.sqrt(Ns)
+		y_b     = signal.filtfilt(smoother, 1, generateBroadH(Ny, T-1, T_const, y_gain))
+		y.append(y_b)		
+
+	return np.array(y)
 
 
 def generate_TAPdynamics(theta, modelparameters, B, T, T_low, T_high, yG_low, yG_high):
@@ -143,22 +166,13 @@ def generate_TAPdynamics(theta, modelparameters, B, T, T_low, T_high, yG_low, yG
 	Q_process   = modelparameters['Q_process']
 	Q_obs       = modelparameters['Q_obs']
 	nltype      = modelparameters['nltype']
-	smoother    = modelparameters['smoothing_filter']
 
 	U = extractParams(theta, 18, Ns, Ny, Nr)[3] # embedding matrix
 
-	y, x, r = [], [], []
+	y = generate_Input(modelparameters, B, T, T_low, T_high, yG_low, yG_high)
 
-	for b in range(B):
-		T_const = np.random.randint(low=T_low,high=T_high)
-		y_gain  = np.random.randint(low=yG_low,high=yG_high) if (yG_low < yG_high) else yG_low
-		y_gain  = y_gain/np.sqrt(Ns)
-		y_b     = signal.filtfilt(smoother, 1, generateBroadH(Ny, T-1, T_const, y_gain))
-		y.append(y_b)		
-
-	y = np.array(y)
-
-	x = runTAP(y, Q_process, Q_obs, theta, nltype) # run inputs through TAP dynamics
+	x0 	= np.random.rand(Ns,B) 								# initial values of x
+	x 	= runTAP(x0, y, Q_process, Q_obs, theta, nltype) 	# run inputs through TAP dynamics
 
 	r = torch.matmul(torch.tensor(U),torch.tensor(x)).data.numpy()
 	r += np.random.multivariate_normal(np.zeros(Nr),Q_obs,(B,T)).transpose(0,2,1)
@@ -205,3 +219,57 @@ def generate_TAPbrain_dynamics(brain, theta, modelparameters, B, T, T_low, T_hig
 	
 	# return clipped arrays
 	return y[...,T_clip:], x[...,T_clip:], r[...,T_clip:]
+
+
+
+def TAPnonlinearity(x,y,G,J,V,lam):
+
+	"""
+	function that computes the TAP nonlinearity in PyTorch
+	x_i(t+1) = (1-lam)*x_i(t) + lam*sigmoid(sum_{j,a,b,c} G_{abc}J_{ij}^a x_i(t)^b x_j(t)^c + (Vy(t))_i ) for i=1 to N_s
+	
+	inputs:
+	x : tensor of shape B x Ns x Np (B, Ns, Np = no. of batches, x varibles , particles)
+	y : tensor of shape B x Ny x 1  (Ny = no. of input variables)
+	G : message passing parameters
+	J : interaction matrix, tensor of shape Ns x Ns
+	V : input mapping matrix, tensor of shape Ns x Ny
+	lam: low pass filtering constant for TAP dynamics 
+
+	output: 
+	x(t+1) : tensor of shape B x Ns x Np
+
+	"""
+
+	Ns      = x.shape[1]
+	device  = x.device 
+	dtype   = x.dtype
+	sigmoid = torch.nn.Sigmoid()
+	J2      = J**2
+	x2      = x**2
+	J1      = torch.mm(J,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+	Jx      = torch.matmul(J,x)
+	Jx2     = torch.matmul(J,x2)
+	J21     = torch.mm(J2,torch.ones((Ns,1),device=device,dtype=dtype)).unsqueeze(0)
+	J2x     = torch.matmul(J2,x)
+	J2x2    = torch.matmul(J2,x2)
+
+	#argf    = torch.matmul(V,y.unsqueeze(2)) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+	argf    = torch.matmul(V,y) + G[0]*J1 + G[1]*Jx + G[2]*Jx2 + G[9]*J21 + G[10]*J2x + G[11]*J2x2 + x*( G[3]*J1 + G[4]*Jx + G[5]*Jx2 + G[12]*J21 + G[13]*J2x + G[14]*J2x2 ) + x2*(G[6]*J1 + G[7]*Jx + G[8]*Jx2 + G[15]*J21 + G[16]*J2x + G[17]*J2x2)
+	
+	return (1-lam)*x + lam*sigmoid(argf)
+
+
+
+def runTAP_torch(x0, y, J, G, V, lam):
+    T = y.shape[2]
+    xMat = []
+    xMat.append(x0)
+    xt = x0.unsqueeze(2)
+    for t in range(T):
+        yt = y[...,t].unsqueeze(2)
+        xnew = TAPnonlinearity(xt, yt, G, J, V, lam)
+        xMat.append(xnew.squeeze())
+        xt = xnew
+        
+    return torch.stack(xMat).permute(1,2,0)

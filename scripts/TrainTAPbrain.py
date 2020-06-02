@@ -75,6 +75,7 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 	B_train 	= y_train.shape[0]
 	epoch 		= B_train//batch_size 	# no. of iterations in one epoch
 	NIterations = epoch*NEpochs 		# total no. of iterations
+	print('Total no. of iterations =', NIterations)
 
 	# convert training data to torch tensors
 	y_train = torch.tensor(y_train.transpose(0,2,1), dtype=torch.float32) # input signal
@@ -82,12 +83,6 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 
 	y_val = torch.tensor(y_val.transpose(0,2,1), dtype=torch.float32) # input signal
 	r_val = torch.tensor(r_val.transpose(0,2,1), dtype=torch.float32) # target neural activity
-
-	if use_cuda and torch.cuda.is_available():
-		y_train = y_train.cuda()
-		r_train = r_train.cuda()
-		y_val 	= y_val.cuda()
-		r_val 	= r_val.cuda()
 
 
 	train_loss, val_loss = [], []
@@ -111,9 +106,9 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 		
 		batch_index = torch.randint(0, B_train,(batch_size,))
 
-		rhat_train  = brain(y_train[batch_index])[0]
+		rhat_train  = brain(y_train[batch_index].cuda())[0]
 		
-		mse_train = loss_fn(r_train[batch_index,T_clip:], rhat_train[:,T_clip:])
+		mse_train = loss_fn(r_train[batch_index,T_clip:].cuda(), rhat_train[:,T_clip:])
 		
 		mse_train.backward()  
 		
@@ -121,12 +116,12 @@ def trainbrain(brain, y_train, y_val, r_train, r_val, NEpochs, batch_size, T_cli
 
 		if (iteration + 1) % epoch == 0:
 			with torch.no_grad(): 
-				rhat_val = brain(y_val)[0]
-				mse_val  = loss_fn(r_val[:,T_clip:], rhat_val[:,T_clip:])
+				rhat_val = brain(y_val.cuda())[0]
+				mse_val  = loss_fn(r_val[:,T_clip:].cuda(), rhat_val[:,T_clip:])
 			train_loss.append(mse_train.item())
 			val_loss.append(mse_val.item())
 		
-		if (iteration + 1) % 5000 == 0:
+		if (iteration + 1) % 500 == 0:
 			print('[%d] training loss: %.5f' %(iteration + 1, mse_train.item()))
 
 	print('Finished training')
@@ -182,6 +177,14 @@ def main():
 
 	# create the tap brain 
 	tapbrain = createbrain(Ny, N_hidden, Nr, use_cuda)
+
+	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+	print('Using device:', device)
+	
+
+	#Additional Info when using cuda
+	if device.type == 'cuda':
+		print(torch.cuda.get_device_name(0))
 
 	# train the tap brain
 	print('Training brain ... ')
