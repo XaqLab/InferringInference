@@ -3,7 +3,6 @@ import numpy as np
 from scipy import signal
 from scipy import optimize
 from sklearn.decomposition import FastICA
-import matplotlib.pyplot as plt
 from scipy.io import loadmat
 from scipy.io import savemat
 import pickle

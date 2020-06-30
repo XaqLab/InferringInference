@@ -18,6 +18,7 @@ def main():
 	learning_rate 	= float(sys.argv[9]) 	# learning rate for M step
 	alpha_J         = int(sys.argv[10])		# coefficient of L1 penalty on J
 	q_obs 			= float(sys.argv[11])	# variance of independent measurement noise to add
+	support_G		= int(sys.argv[12]) 	# no. of G coefficients to use
 
 	use_cuda 		= False
 	q_process 		= 1e-5
@@ -176,7 +177,9 @@ def main():
 
 		# M-step
 		C.backward() 
-		G_hat.grad[0], G_hat.grad[9] = 0, 0 #set gradient of G0 and G9 to zero
+		#G_hat.grad[0], G_hat.grad[9] = 0, 0 #set gradient of G0 and G9 to zero
+		if support_G < len(G):
+			G_hat.grad[support_G:] = 0 
 		optimizer.step()
 
 		# record the log likelihood
