@@ -3,9 +3,9 @@ warnings.filterwarnings('ignore')
 from utils import *
 from tapdynamics import *
 from particlefilter import *
-import matplotlib.pyplot as plt
-from matplotlib import rc
-rc('text', usetex=True)
+# import matplotlib.pyplot as plt
+# from matplotlib import rc
+# rc('text', usetex=True)
 
 
 def loadbrain(fname, use_cuda):
