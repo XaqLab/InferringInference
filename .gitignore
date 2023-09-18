@@ -1,7 +1,7 @@
 # Don't track content of these folders
 code/__pycache__/
 notebooks/.ipynb_checkpoints/
-data/brains
+# data/brains
 data/estimates
 data/recordings
 results
