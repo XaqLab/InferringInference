@@ -15,9 +15,13 @@ This folder contains the main python code:
 ### data/brains
 This folder contains the parameters for a few example TAP brains.
 
+### data/pem-estimates
+This folder contains particle-EM estimates for a few example TAP brains.
+
 ### notebooks
 - `TrainTAPbrain.ipynb` : example notebook that illustrates the training of a TAP brain model
-- `InferTAPbrain-brain-2022-Nr-500.ipynb` : example notebook that illustrates inferring inference in a TAP brain model
+- `InferTAPbrain.ipynb` : example notebook that illustrates inferring inference in a TAP brain model
+- `GreedyBackwardSearch.ipynb`: example notebook that illustrates the greedy approach to find the best set of G and J parameters
 
 ### scripts
 - `InferTAPbrain.py` : script for inferring inference in a TAP brain model
